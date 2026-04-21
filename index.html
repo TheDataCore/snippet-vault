@@ -342,6 +342,28 @@
     to { opacity: 0; transform: translateY(6px) scale(0.95); }
   }
   .toast-dot { width: 6px; height: 6px; background: var(--accent); border-radius: 50%; flex-shrink: 0; }
+  .toast-dot-error { background: var(--danger); }
+
+  /* ── STORAGE BANNER ── */
+  .storage-banner {
+    display: flex; align-items: flex-start; gap: 10px;
+    background: var(--danger-bg);
+    border: 1px solid var(--danger);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    margin-bottom: 1.25rem;
+    font-size: 13px;
+    color: var(--danger);
+    line-height: 1.5;
+  }
+  .storage-banner svg { flex-shrink: 0; margin-top: 1px; }
+  .storage-banner-msg { flex: 1; }
+  .storage-banner-dismiss {
+    background: none; border: none; cursor: pointer;
+    color: var(--danger); font-size: 16px; line-height: 1;
+    padding: 0; opacity: 0.7; flex-shrink: 0;
+  }
+  .storage-banner-dismiss:hover { opacity: 1; }
 
   /* ── FOOTER ── */
   footer {
@@ -414,6 +436,12 @@
     </div>
   </header>
 
+  <div id="storage-banner" class="storage-banner" style="display:none;">
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none"><circle cx="7.5" cy="7.5" r="6.5" stroke="currentColor" stroke-width="1.4"/><path d="M7.5 4.5v4M7.5 10.5v.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    <span class="storage-banner-msg">Private browsing or storage blocked — snippets <strong>won't be saved</strong> after you close this tab.</span>
+    <button class="storage-banner-dismiss" onclick="this.parentElement.style.display='none'" title="Dismiss">&times;</button>
+  </div>
+
   <div class="search-wrap">
     <span class="search-icon">
       <svg width="15" height="15" viewBox="0 0 15 15" fill="none"><circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" stroke-width="1.4"/><path d="M10 10.5l3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
@@ -439,17 +467,40 @@
   let snippets = [];
   let editingId = null;
 
+  /* ── SAFE STORAGE ── */
+  const safeStorage = {
+    get(key)      { try { return localStorage.getItem(key); }      catch { return null; } },
+    set(key, val) { try { localStorage.setItem(key, val); return true; } catch(e) { return e; } },
+    remove(key)   { try { localStorage.removeItem(key); }          catch {} }
+  };
+
+  let storageAvailable = false;
+  (function detectStorage() {
+    const probe = '__sv_probe__';
+    const result = safeStorage.set(probe, '1');
+    if (result === true) { safeStorage.remove(probe); storageAvailable = true; }
+  })();
+
   function load() {
-    try { snippets = JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; }
+    try { snippets = JSON.parse(safeStorage.get(STORAGE_KEY)) || []; }
     catch { snippets = []; }
   }
-  function save() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(snippets));
+
+  function save(rollbackTo) {
+    if (!storageAvailable) return true;
+    const result = safeStorage.set(STORAGE_KEY, JSON.stringify(snippets));
+    if (result !== true) {
+      const isQuota = result && (result.name === 'QuotaExceededError' || result.name === 'NS_ERROR_DOM_QUOTA_REACHED' || result.code === 22);
+      showToast(isQuota ? 'Storage full — delete snippets to free space' : 'Save failed — storage error', 'error');
+      if (rollbackTo !== undefined) { snippets = rollbackTo; renderGrid(); }
+      return false;
+    }
+    return true;
   }
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 
   /* ── THEME ── */
-  const saved = localStorage.getItem('sv_theme') || 'light';
+  const saved = safeStorage.get('sv_theme') || 'light';
   document.documentElement.setAttribute('data-theme', saved);
   const SUN_SVG  = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="8" cy="8" r="3" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M11.7 3.2l-1.1 1.1M3.2 11.7l1.1 1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`;
   const MOON_SVG = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M13.5 9.5A6 6 0 016.5 2.5a6 6 0 100 11 6 6 0 007-4z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
@@ -464,7 +515,7 @@
     const cur = document.documentElement.getAttribute('data-theme');
     const next = cur === 'dark' ? 'light' : 'dark';
     document.documentElement.setAttribute('data-theme', next);
-    localStorage.setItem('sv_theme', next);
+    safeStorage.set('sv_theme', next);
     updateThemeIcon();
   }
 
@@ -505,19 +556,24 @@
     if (!title) { document.getElementById('inp-title').focus(); return; }
     if (!content) { document.getElementById('inp-content').focus(); return; }
 
+    const prev = snippets.map(s => ({...s}));
     if (editingId) {
       const s = snippets.find(s => s.id === editingId);
       s.title = title; s.content = content; s.updatedAt = Date.now();
     } else {
       snippets.unshift({ id: uid(), title, content, createdAt: Date.now() });
     }
-    save(); closeModal(); renderGrid();
+    const savedOk = save(prev);
+    if (!savedOk) return;
+    closeModal(); renderGrid();
     showToast(editingId ? 'Snippet updated' : 'Snippet saved');
   }
 
   function deleteSnippet(id) {
+    const prev = snippets.map(s => ({...s}));
     snippets = snippets.filter(s => s.id !== id);
-    save(); renderGrid();
+    if (!save(prev)) return;
+    renderGrid();
     showToast('Snippet deleted');
   }
 
@@ -554,20 +610,21 @@
         btn.innerHTML = COPY_ICON + ' Copy';
       }, 1800);
       showToast('Copied to clipboard!');
-    }).catch(() => showToast('Copy failed — try HTTPS or localhost'));
+    }).catch(() => showToast('Copy failed — try HTTPS or localhost', 'error'));
   }
 
   /* ── TOAST ── */
-  function showToast(msg) {
+  function showToast(msg, type = 'success') {
     const c = document.getElementById('toast-container');
     const t = document.createElement('div');
     t.className = 'toast';
-    t.innerHTML = `<span class="toast-dot"></span>${msg}`;
+    const dotClass = type === 'error' ? 'toast-dot toast-dot-error' : 'toast-dot';
+    t.innerHTML = `<span class="${dotClass}"></span>${msg}`;
     c.appendChild(t);
     setTimeout(() => {
       t.classList.add('out');
       setTimeout(() => t.remove(), 300);
-    }, 2000);
+    }, type === 'error' ? 3500 : 2000);
   }
 
   /* ── RENDER ── */
@@ -653,6 +710,9 @@
   load();
   seedIfEmpty();
   renderGrid();
+  if (!storageAvailable) {
+    document.getElementById('storage-banner').style.display = 'flex';
+  }
 </script>
 </body>
 </html>
